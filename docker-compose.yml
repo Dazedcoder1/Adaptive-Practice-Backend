@@ -1,0 +1,53 @@
+# Backend stack: API, Celery workers, scheduler and Redis. PostgreSQL is Neon (managed).
+#   docker compose up --build    -> everything here
+#   docker compose up redis      -> just Redis, if you run the API natively
+# The web app lives in the frontend repo (point its API_PROXY_TARGET at this API).
+
+x-backend: &backend
+  build: .
+  env_file: .env
+  environment:
+    REDIS_URL: redis://redis:6379/0
+  depends_on:
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  migrate:
+    <<: *backend
+    command: alembic upgrade head
+    restart: "no"
+
+  backend:
+    <<: *backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes: [".:/app"]
+    ports: ["8000:8000"]
+    depends_on:
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  worker-default:
+    <<: *backend
+    command: celery -A app.workers.celery_app worker -Q default -n default@%h -l info
+
+  worker-ai:
+    <<: *backend
+    command: celery -A app.workers.celery_app worker -Q ai -n ai@%h -l info --concurrency 2
+
+  worker-analytics:
+    <<: *backend
+    command: celery -A app.workers.celery_app worker -Q analytics -n analytics@%h -l info
+
+  scheduler:
+    <<: *backend
+    command: celery -A app.workers.celery_app beat -l info --schedule /tmp/celerybeat-schedule
